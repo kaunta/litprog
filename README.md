@@ -28,3 +28,6 @@ for 3rd party applications to interact with.
 The application file format (the database schema) will be documented and
 frozen to allow for 3rd party programs to analyze a literate program.
 
+# Other Documents
+
+- [LITPROG SQLITE FORMAT](doc/sqlite_format.md)
