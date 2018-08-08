@@ -150,6 +150,6 @@ CREATE TABLE Line_Reference (
   suffix     TEXT     NOT NULL,
 
   FOREIGN KEY (line_id)
-              REFERENCES Lines(id)
+              REFERENCES Line(id)
 );
 ```
