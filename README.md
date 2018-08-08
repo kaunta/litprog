@@ -32,3 +32,4 @@ frozen to allow for 3rd party programs to analyze a literate program.
 
 - [LITPROG SQLITE FORMAT](doc/sqlite_format.md)
 - [LITPROG TEXT FORMAT](doc/text_format.md)
+- [LITPROG COMMAND LINE INTERFACE](doc/cli.md)
