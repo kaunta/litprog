@@ -31,3 +31,4 @@ frozen to allow for 3rd party programs to analyze a literate program.
 # Other Documents
 
 - [LITPROG SQLITE FORMAT](doc/sqlite_format.md)
+- [LITPROG TEXT FORMAT](doc/text_format.md)
