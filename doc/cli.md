@@ -23,6 +23,6 @@ Additionally, `litprog` can dump the in-memory SQLite database
   - `$ litprog tangle main.c <prog.txt >code.c`
       - Use `litprog` to **tangle** the node `main.c` out of literate
         program `prog.txt` and into file `code.c`.
-  - `$ litprog dump <prog.txt >dump.db`
+  - `$ litprog dump db.sqlite <prog.txt`
       - Use `litprog` to parse literate program `prog.txt` and dump the
-        corresponding SQLite database into `dump.db`.
+        corresponding SQLite database into `db.sqlite`.
