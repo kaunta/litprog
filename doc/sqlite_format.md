@@ -75,10 +75,12 @@ CREATE TABLE Position_Chunk (
 -- : “Line «line_id» is at position «position» in chunk «chunk_id».”
 --
 CREATE TABLE Position_Line (
-  position  INTEGER  PRIMARY KEY,
+  position  INTEGER  NOT NULL,
   chunk_id  INTEGER  NOT NULL,
   line_id   INTEGER  NOT NULL,
 
+  PRIMARY KEY (position, chunk_id),
+  
   FOREIGN KEY (chunk_id)
               REFERENCES Chunk(id),
 
@@ -150,6 +152,6 @@ CREATE TABLE Line_Reference (
   suffix     TEXT     NOT NULL,
 
   FOREIGN KEY (line_id)
-              REFERENCES Lines(id)
+              REFERENCES Line(id)
 );
 ```
