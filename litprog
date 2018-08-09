@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+
+import re
+import sqlite3
+import sys
+
+def main():
+    validate_args(sys.argv)
+
+    with database() as db:
+        parse_litprog(db, sys.stdin)
+        if sys.argv[1] == 'dump':
+            dump_database(db, sys.argv[2])
+        elif sys.argv[1] == 'weave':
+            weave_database(db, sys.stdout)
+        elif sys.argv[1] == 'tangle':
+            tangle_database(db, sys.argv[2], sys.stdout)
+
+
+def validate_args(args):
+    """Assert command line arguments `args` conform to doc/cli.md."""
+    assert len(args) >= 2
+    assert args[1] in {'weave', 'tangle', 'dump'}
+
+    if args[1] == 'weave':
+        assert len(args) == 2
+    elif args[1] == 'tangle':
+        assert len(args) == 3
+    elif args[1] == 'dump':
+        assert len(args) == 3
+
+def database():
+    """Create in-memory SQLite database conforming to doc/sqlite_format.md."""
+    db = sqlite3.connect(':memory:')
+
+    db.executescript(database_schema())
+
+    return db
+
+def database_schema():
+    """Return a SQLite schema conforming to doc/sqlite_format.md."""
+    return '''
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE Position_Chunk (
+          position  INTEGER  PRIMARY KEY,
+          chunk_id  INTEGER  NOT NULL,
+
+          FOREIGN KEY (chunk_id)
+                      REFERENCES Chunk(id)
+        );
+
+        CREATE TABLE Position_Line (
+          position  INTEGER  NOT NULL,
+          chunk_id  INTEGER  NOT NULL,
+          line_id   INTEGER  NOT NULL,
+
+          PRIMARY KEY (position, chunk_id),
+          
+          FOREIGN KEY (chunk_id)
+                      REFERENCES Chunk(id),
+
+          FOREIGN KEY (line_id)
+                      REFERENCES Line(id)
+        );
+
+
+        CREATE TABLE Chunk (
+          id       INTEGER  PRIMARY KEY,
+          species  TEXT     NOT NULL,
+
+          CHECK (
+            species IN ('DOCUMENTATION', 'CODE')
+          )
+        );
+
+        CREATE TABLE Chunk_Name (
+          chunk_id  INTEGER  PRIMARY KEY,
+          name      TEXT     NOT NULL,
+
+          FOREIGN KEY (chunk_id)
+                      REFERENCES Chunk(id)
+        );
+
+
+        CREATE TABLE Line (
+          id       INTEGER  PRIMARY KEY,
+          species  TEXT     NOT NULL,
+
+          CHECK (
+            species IN ('VERBATIM', 'REFERENCE')
+          )
+        );
+
+        CREATE TABLE Line_Verbatim (
+          line_id  INTEGER  PRIMARY KEY,
+          content  TEXT     NOT NULL,
+
+          FOREIGN KEY (line_id)
+                      REFERENCES Line(id)
+        );
+
+        CREATE TABLE Line_Reference (
+          line_id    INTEGER  PRIMARY KEY,
+          prefix     TEXT     NOT NULL,
+          reference  TEXT     NOT NULL,
+          suffix     TEXT     NOT NULL,
+
+          FOREIGN KEY (line_id)
+                      REFERENCES Line(id)
+        );
+    '''
+
+def dump_database(db, filename):
+    """Dump `db` into file `filename`."""
+
+    with sqlite3.connect(filename) as dump_db:
+        db.execute('COMMIT;')
+        db.backup(dump_db)
+
+def parse_litprog(db, lp):
+    """Parse literate program in File `lp` and update database `db`."""
+
+    pat_code = re.compile(r'^<(-*)<(.*)>\1>=$')
+    pat_doc  = re.compile(r'^@$')
+    pat_ref  = None
+
+    state  = 'documentation'
+    name   = None
+    marker = None
+    chunk  = []
+    doc    = []
+
+    line_count  = 0
+    chunk_count = 0
+    
+    def insert_verbatim(line_id, txt):
+        db.execute('''
+            INSERT INTO Line (id, species) VALUES (?, 'VERBATIM');
+            ''', (line_id,))
+        db.execute('''
+            INSERT INTO Line_Verbatim(line_id, content) VALUES (?, ?);
+            ''', (line_id, txt))
+
+        return line_id
+
+    def insert_reference(line_id, prefix, reference, suffix):
+        db.execute('''
+            INSERT INTO Line(id, species) VALUES (?, 'REFERENCE');
+            ''', (line_id,))
+        db.execute('''
+            INSERT INTO Line_Reference(line_id, prefix, reference, suffix)
+            VALUES (?, ?, ?, ?);
+            ''', (line_id, prefix, reference, suffix))
+
+        return line_id
+
+    def insert_documentation(chunk_id, chunk):
+        db.execute('''
+            INSERT INTO Chunk(id, species) VALUES (?, 'DOCUMENTATION');
+        ''', (chunk_id,))
+        for line_pos, line_id in enumerate(chunk):
+            db.execute('''
+                INSERT INTO Position_Line (position, chunk_id, line_id)
+                VALUES (?, ?, ?);
+            ''', (line_pos, chunk_id, line_id))
+        return chunk_id
+
+    def insert_code(chunk_id, name, chunk):
+        db.execute('''
+            INSERT INTO Chunk(id, species) VALUES (?, 'CODE');
+        ''', (chunk_id,))
+        db.execute('''
+            INSERT INTO Chunk_Name(chunk_id, name) VALUES (?, ?);
+        ''', (chunk_id, name))
+        for line_pos, line_id in enumerate(chunk):
+            db.execute('''
+                INSERT INTO Position_Line (position, chunk_id, line_id)
+                VALUES (?, ?, ?);
+            ''', (line_pos, chunk_id, line_id))
+        return chunk_id
+
+    for line in lp:
+        line = line.rstrip()
+        if state == 'documentation':
+            if pat_code.search(line):
+                chunk_count += 1
+                doc.append(insert_documentation(chunk_count, chunk))
+                
+                state = 'code'
+
+                match   = pat_code.search(line)
+                marker  = match.group(1)
+                name    = match.group(2)
+                pat_ref = re.compile(r'^(.*)<{0}<(.*)>{0}>(.*)$'.format(marker))
+
+                chunk = []
+            elif pat_doc.search(line):
+                chunk_count += 1
+                doc.append(insert_documentation(chunk_count, chunk))
+
+                chunk = []
+            else:
+                line_count += 1
+                chunk.append(insert_verbatim(line_count, line))
+        elif state == 'code':
+            if pat_code.search(line):
+                chunk_count += 1
+                doc.append(insert_code(chunk_count, name, chunk))
+
+                match   = pat_code.search(line)
+                marker  = match.group(1)
+                name    = match.group(2)
+                pat_ref = re.compile(r'^(.*)<{0}<(.*)>{0}>(.*)$'.format(marker))
+
+                chunk = []
+            elif pat_doc.search(line):
+                chunk_count += 1
+                doc.append(insert_code(chunk_count, name, chunk))
+
+                state = 'documentation'
+
+                chunk = []
+            elif pat_ref.search(line):
+                match = pat_ref.search(line)
+
+                prefix    = match.group(1)
+                reference = match.group(2)
+                suffix    = match.group(3)
+
+                line_count += 1
+                chunk.append(
+                        insert_reference(line_count, prefix, reference, suffix))
+            else:
+                line_count += 1
+                chunk.append(insert_verbatim(line_count, line))
+
+    if state == 'documentation':
+        chunk_count += 1
+        doc.append(insert_documentation(chunk_count, chunk))
+    elif state == 'code':
+        chunk_count += 1
+        doc.append(insert_code(chunk_count, name, chunk))
+
+    db.executemany('''
+        INSERT INTO Position_Chunk(position, chunk_id)
+        VALUES (?, ?);
+        ''', enumerate(doc))
+
+def weave_database(db, ofile):
+    """Weave database `db` into HTML and output to File `ofile`."""
+    sql = {
+        'all chunks': '''
+              SELECT id, species
+                FROM Chunk
+                     INNER JOIN Position_Chunk
+                                ON chunk_id = id
+            ORDER BY position;''',
+        'documentation lines': '''
+              SELECT content
+                FROM Line
+                     INNER JOIN Position_Line
+                                ON chunk_id = :chunk_id
+                                   AND Position_Line.line_id = Line.id
+                     INNER JOIN Line_Verbatim
+                                ON Line_Verbatim.line_id = Line.id
+               WHERE species = 'VERBATIM'
+            ORDER BY position ASC;''',
+        'chunk name': '''
+            SELECT name
+              FROM Chunk_Name
+             WHERE chunk_id = :chunk_id
+             LIMIT 1;''',
+        'code lines': '''
+            SELECT id, species
+              FROM Line
+                   INNER JOIN Position_Line
+                              ON chunk_id = :chunk_id
+                                 AND Position_Line.line_id = Line.id
+            ORDER BY position ASC;''',
+        'verbatim line': '''
+            SELECT content
+              FROM Line_Verbatim
+             WHERE line_id = :line_id
+             LIMIT 1;''',
+        'reference line': '''
+            SELECT prefix, reference, suffix
+              FROM Line_Reference
+             WHERE line_id = :line_id
+             LIMIT 1;''',
+        'reference id': '''
+              SELECT id
+                FROM Chunk
+                     INNER JOIN Chunk_Name
+                                ON id = Chunk_Name.chunk_id
+                     INNER JOIN Position_Chunk
+                                ON id = Position_Chunk.chunk_id
+               WHERE species = 'CODE'
+                     AND name = :name
+            ORDER BY position
+               LIMIT 1;''',
+        'continuation?': '''
+            WITH Position_Name AS
+                (
+                    SELECT position, name, id
+                      FROM Position_Chunk
+                           NATURAL JOIN Chunk_Name
+                             INNER JOIN Chunk
+                                        ON id = chunk_id
+                     WHERE species = 'CODE'
+                )
+            SELECT P1.id
+              FROM Position_Name AS P1
+                   INNER JOIN Position_Name AS P2
+                              ON P1.position > P2.position
+                                 AND P1.name = P2.name
+             WHERE P1.id = :chunk_id;'''
+    }
+
+    for chunk_id, chunk_species in db.execute(sql['all chunks']):
+        if chunk_species == 'DOCUMENTATION':
+            query = db.execute(
+                sql['documentation lines'], { 'chunk_id': chunk_id })
+            for (line,) in query:
+                print(line)
+        elif chunk_species == 'CODE':
+            (name,) = db.execute(
+                sql['chunk name'], { 'chunk_id': chunk_id }).fetchone()
+            continuation = bool(db.execute(sql['continuation?'], { 'chunk_id': chunk_id }).fetchone())
+            print('<figure id="litprog-{}">'.format(chunk_id))
+            print('<figcaption><b><code><a href="#litprog-{}">&lt;{}&gt;{}=</a></code></b>'.format(
+                chunk_id,
+                name,
+                '+' if continuation else ''))
+            
+            lines = []
+            query = db.execute(sql['code lines'], { 'chunk_id': chunk_id })
+            for line_id, line_species in query:
+                if line_species == 'VERBATIM':
+                    (content,) = db.execute(sql['verbatim line'], { 'line_id': line_id }).fetchone()
+                    lines.append(html_escape(content))
+                elif line_species == 'REFERENCE':
+                    (prefix, reference, suffix) = db.execute(sql['reference line'], { 'line_id': line_id }).fetchone()
+                    (reference_id,) = (db.execute(sql['reference id'], { 'name': reference }).fetchone() or (None,))
+                    
+                    if reference_id is None:
+                        lines.append(
+                            '{}<mark><b>&lt;{}&gt;</b></mark>{}'.format(
+                                html_escape(prefix),
+                                html_escape(reference),
+                                html_escape(suffix)
+                            )
+                        )
+                    else:
+                        lines.append(
+                            '{}<b><a href="#litprog-{}">&lt;{}&gt;</a></b>{}'.format(
+                                html_escape(prefix),
+                                reference_id,
+                                html_escape(reference),
+                                html_escape(suffix)
+                            )
+                        )
+
+            print("<pre><code>{}</code></pre>".format("\n".join(lines)))
+            
+            print('</figure>')
+
+def html_escape(txt):
+    """Escape string `txt` for HTML injection."""
+    return txt.replace("&", "&amp;").replace("<", "&lt;")
+
+def tangle_database(db, node, ofile, prefix='', suffix=''):
+    """Recursively tangle 'node' into 'ofile', using database 'db'."""
+    sql = {
+        'lines': '''
+              SELECT Line.id, Line.species
+                FROM Line
+                     INNER JOIN Position_Line
+                                ON Position_Line.line_id = Line.id
+                     INNER JOIN Chunk_Name
+                                ON Chunk_Name.chunk_id = Position_Line.chunk_id
+                     INNER JOIN Chunk
+                                ON Chunk.id = Chunk_Name.chunk_id
+               WHERE name = :name
+                     AND Chunk.species = 'CODE'
+            ORDER BY position ASC;''',
+        'verbatim line': '''
+            SELECT content
+              FROM Line_Verbatim
+             WHERE line_id = :line_id;''',
+        'reference line': '''
+            SELECT prefix, reference, suffix
+              FROM Line_REFERENCE
+             WHERE line_id = :line_id;'''
+    }
+    for (line_id, line_species) in db.execute(sql['lines'], { 'name': node }):
+        if line_species == 'VERBATIM':
+            (content,) = db.execute(sql['verbatim line'], { 'line_id': line_id }).fetchone()
+            print("{}{}{}".format(prefix, content, suffix))
+        elif line_species == 'REFERENCE':
+            (prefix_, reference, suffix_) = db.execute(sql['reference line'], { 'line_id': line_id }).fetchone()
+            tangle_database(db, reference, ofile,
+                prefix=prefix+prefix_,
+                suffix=suffix_+suffix)
+
+if __name__ == "__main__":
+    main()
