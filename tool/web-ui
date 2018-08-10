@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+
+import http.server
+import re
+import sqlite3
+import sys
+
+db = None
+
+def main():
+    global db
+    
+    assert len(sys.argv) == 2 
+    db = sqlite3.connect(sys.argv[1])
+    server_address = ('', 8000)
+    httpd = http.server.HTTPServer(('', 8000), LitprogServer)
+    httpd.serve_forever()
+    db.close()
+
+
+class LitprogServer(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith('/chunk-'):
+            self.display_chunk()
+        else:
+            self.display_general()
+
+
+    def display_chunk(self):
+        global db
+        
+        valid_ids = set((
+            c_id
+            for (c_id,)
+            in db.execute('SELECT id FROM Chunk;')
+        ))
+        
+        # path starts with '/chunk-'
+        r_id = int(self.path[7:])
+
+        if r_id not in valid_ids:
+            self.send_response(404)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+
+            self.wfile.write(bytes(f'''
+            <!doctype html>
+            <html lang="en-US">
+            <head>
+                <meta charset="utf-8" />
+                <title>LITPROG: 404 — Bad Chunk ID</title>
+            </head>
+            <body>
+                <h1>LITPROG: 404 — Bad Chunk ID</h1>
+                <p>Chunk <mark>chunk-{r_id}</mark> does not exist.</p>
+                <p>Return to the <a href="/">home page</a>.</p>
+            </body>
+            </html>
+            ''', encoding='utf-8'))
+            
+            return
+
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+
+        self.wfile.write(bytes(f'''
+        <!doctype html>
+        <html lang="en-US">
+        <head>
+            <meta charset="utf-8" />
+            <title>Chunk {r_id}</title>
+        </head>
+        <body>
+            <header>
+                <h1>LITPROG: Chunk {r_id}</h1>
+            </header>
+            <aside>
+                <p>Return to the <a href="/">home page.</a></p>
+            </aside>
+        ''', encoding='utf-8'))
+
+        self.wfile.write(bytes(f'''
+        </body>
+        </html>
+        ''', encoding='utf-8'))
+
+        self.wfile.write(bytes('''<html>HI</html>''', encoding='utf-8'))
+
+    def display_general(self):
+        global db
+        
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+
+        sql = {
+            'count all chunks': '''
+                SELECT COUNT(*)
+                  FROM Chunk;''',
+            'count documentation chunks': '''
+                SELECT COUNT(*)
+                  FROM Chunk
+                 WHERE species = 'DOCUMENTATION';''',
+            'count code chunks': '''
+                SELECT COUNT(*)
+                  FROM Chunk
+                 WHERE species = 'CODE';''',
+            'count positioned chunks': '''
+                SELECT COUNT(DISTINCT chunk_id)
+                  FROM Position_Chunk;''',
+            'list unpositioned chunks': '''
+                       SELECT id
+                         FROM Chunk
+                EXCEPT
+                       SELECT chunk_id
+                         FROM Position_Chunk;''',
+            'list positioned chunks': '''
+                  SELECT id, species
+                    FROM Chunk
+                         INNER JOIN Position_Chunk
+                                    ON chunk_id = id
+                ORDER BY position ASC;'''
+        }
+
+        self.wfile.write(bytes('''
+        <!doctype html>
+        <html lang="en-US">
+        <head>
+            <meta charset="utf-8" />
+            <title>LITPROG: Document Overview</title>
+        </head>
+        <body>
+            <header>
+                <h1>LITPROG: Document Overview</h1>
+            </header>
+            <main>
+        ''', encoding='utf-8'))
+
+        count = {
+            'all chunks': \
+                db.execute(sql['count all chunks']).fetchone()[0],
+            'documentation chunks': \
+                db.execute(sql['count documentation chunks']).fetchone()[0],
+            'code chunks': \
+                db.execute(sql['count code chunks']).fetchone()[0],
+            'positioned chunks': \
+                db.execute(sql['count positioned chunks']).fetchone()[0]
+        }
+        self.wfile.write(bytes(f'''
+            <table>
+                <caption>Chunk Counts</caption>
+                <tr><th>Total Chunks</th><td>{count['all chunks']}</td></tr>
+                <tr><th>Documentation Chunks</th><td>{count['documentation chunks']}</td></tr>
+                <tr><th>Code Chunks:</th><td>{count['code chunks']}</td></tr>
+                <tr><th>Positioned Chunks</th><td>{count['positioned chunks']}</td></tr>
+                <tr><th>Unpositioned Chunks</th><td>{count['all chunks'] - count['positioned chunks']}</td></tr>
+            </table>
+        ''', encoding='utf-8'))
+
+        unpositioned_chunks = db.execute(sql['list unpositioned chunks']).fetchall()
+        if len(unpositioned_chunks) > 0:
+            chunk_links = [ f'<a href="/chunk-{c_id}">chunk-{c_id}</a>' for (c_id,) in unpositioned_chunks ]
+            self.wfile.write(bytes('''<p>Unpositioned Chunks:</p><ul>''', encoding='utf-8'))
+            for (c_id,) in unpositioned_chunks:
+                self.wfile.write(bytes(f'<li><a href="/chunk-{c_id}">chunk-{c_id}</a></li>', encoding='utf-8'))
+            
+            self.wfile.write(bytes('''</ul>''', encoding='utf-8'))
+
+        # All chunks in position
+        query_text = '''
+        WITH First_Line AS
+        (
+              SELECT chunk_id, MIN(position) AS position
+                FROM Position_Line
+               WHERE line_id IN (
+                        SELECT line_id
+                          FROM Line_Verbatim
+                         WHERE content <> ''
+                     )
+            GROUP BY chunk_id
+        )
+          SELECT id, species, name, content
+            FROM Chunk
+                 INNER JOIN Position_Chunk
+                            ON Position_Chunk.chunk_id = Chunk.id
+                 LEFT OUTER JOIN Chunk_Name
+                                 ON Chunk_Name.chunk_id = Chunk.id
+                 LEFT OUTER JOIN First_Line
+                                 ON First_Line.chunk_id = Chunk.id
+                 LEFT OUTER JOIN Position_Line
+                                 ON Position_Line.chunk_id = Chunk.id
+                                 AND Position_Line.position = First_Line.position
+                 LEFT OUTER JOIN Line_Verbatim
+                                 ON Line_Verbatim.line_id = Position_Line.line_id
+        ORDER BY Position_Chunk.position ASC;
+        '''
+
+        self.wfile.write(bytes('''
+        <h2>All Chunks by Position</h2>
+        <table>
+        ''', encoding='utf-8'))
+        
+        for (c_id, c_species, c_name, c_line) in db.execute(query_text):
+            self.wfile.write(bytes(f'''
+            <tr>
+                <th><a href="/chunk-{c_id}">chunk-{c_id}</a></th>
+            ''', encoding='utf-8'))
+            
+            if c_species == 'CODE':
+                self.wfile.write(bytes(f'''
+                <td><b><code>&lt;{html_escape(c_name)}&gt;=</code></b></td>
+                ''', encoding='utf-8'))
+            elif c_species == 'DOCUMENTATION':
+                self.wfile.write(bytes(f'''
+                <td>{html_escape(c_line or '')}…</td>
+                ''', encoding='utf-8'))
+
+            self.wfile.write(bytes('''
+            </tr>
+            ''', encoding='utf-8'))
+        self.wfile.write(bytes('''
+        </table>
+        ''', encoding='utf-8'))
+
+        
+        self.wfile.write(bytes('''
+            </main>
+        </body>
+        </html>
+        ''', encoding='utf-8'))
+        pass
+
+def html_escape(txt):
+    """Escape string `txt` for HTML injection."""
+    return txt.replace("&", "&amp;").replace("<", "&lt;")
+
+if __name__ == "__main__":
+    main()
